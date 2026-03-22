@@ -42,6 +42,28 @@ Interfacing directly with the Ambarella RTOS reveals specific power-saving behav
 
 ---
 
+## CRITICAL: Camera Hardware Modification (`autoexec.ash`)
+
+Out of the box, the DxO ONE acts strictly as a Mass Storage device or an Apple iAP2 accessory. To allow this Java controller to intercept the video stream via USB, you **must** switch the camera into developer mode. 
+
+This is done by overriding the Ambarella RTOS boot sequence using an internal shell script.
+
+### Installation Steps:
+1. Extract the microSD card from your DxO ONE and plug it into your computer.
+2. Copy the `autoexec.ash` file (provided in the `sd_card_root/` folder of this repository) directly into the **root** of the microSD card.
+3. Insert the microSD card back into the camera.
+4. Turn on the camera (Slide the lens cover open).
+
+**What does this script do?**
+* `t dxo iap2_toggle off`: Disables the Apple Lightning port routing, freeing up the internal data bus.
+* `t dxo micro_usb_connected_toggle on`: Forces the micro-USB port to act as an active data peripheral rather than just a charging/mass-storage port.
+
+> **IMPORTANT WARNING:** While this script is active on the SD card, **you will not be able to connect the camera to an iPhone** (the Lightning port is disabled), and it will no longer mount as a standard USB drive on your PC. It effectively turns the camera into a dedicated development board. 
+> 
+> **To revert to normal factory behavior:** Simply delete or rename the `autoexec.ash` file from the microSD card and reboot the camera.
+
+---
+
 ## Prerequisites
 
 | Requirement | Details |
