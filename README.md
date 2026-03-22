@@ -32,6 +32,16 @@ To maintain strict determinism and avoid UI or network blocking, the application
 
 ---
 
+## Hardware Quirks & State Machine
+
+Interfacing directly with the Ambarella RTOS reveals specific power-saving behaviors at the physical layer that this driver actively manages:
+
+* **The Lens Cover Switch:** The camera's internal firmware will not instantiate the video USB pipes (Endpoints `0x82` and `0x01`) unless the physical lens cover is slid open. 
+* **USB PHY Disconnection:** If the camera is plugged in with the cover closed, it defaults to a charging state. To save battery, the firmware actively drops the USB data lines (`D+`/`D-`) while continuing to draw 5V power from `VBUS`. To the host OS, this mimics a physical cord disconnection, throwing a `LIBUSB_ERROR_NO_DEVICE` or `Access Denied` at the kernel level.
+* **Resilient Polling:** Instead of crashing or leaking memory when the hardware disappears, this Java application implements a hardware-aware polling loop. It intercepts the physical disconnect, safely releases the native C memory pointers (`LibUsb.close`), and passively waits for the hardware interrupt (the user opening the cover) to re-claim the interfaces and resume the video stream automatically.
+
+---
+
 ## Prerequisites
 
 | Requirement | Details |

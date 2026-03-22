@@ -44,99 +44,129 @@ public class UsbFrameProducer implements Runnable {
 
     @Override
     public void run() {
-        Context context = new Context();
 
-        int result = LibUsb.init(context);
-        if (result != LibUsb.SUCCESS) {
-            throw new LibUsbException("Failed to initialize libusb.", result);
-        }
+        while (!Thread.currentThread().isInterrupted()) {
+            Context context = new Context();
 
-        DeviceHandle handle = null;
-
-        try {
-            handle = findAndOpenDevice(context, VENDOR_ID);
-            if (handle == null) {
-                System.err.println("DxO ONE camera not found. Is it connected and turned on?");
-                return;
+            int result = LibUsb.init(context);
+            if (result != LibUsb.SUCCESS) {
+                throw new LibUsbException("Failed to initialize libusb.", result);
             }
 
-            // Claim exclusive control of the device interfaces
-            setupDeviceInterfaces(handle);
+            DeviceHandle handle = null;
 
-            System.out.println("Camera initialized. Starting frame capture...");
-
-            // 16KB or 32KB transfers to avoid saturating the bus with tiny requests
-            ByteBuffer inBuffer = BufferUtils.allocateByteBuffer(32768);
-            IntBuffer transferred = BufferUtils.allocateIntBuffer();
-
-            java.io.ByteArrayOutputStream accumulator = new java.io.ByteArrayOutputStream();
-
-            startLiveViewMode(handle);
-
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    inBuffer.clear();
-
-                    int transferResult = LibUsb.bulkTransfer(handle, ENDPOINT_IN, inBuffer, transferred, TIMEOUT_MS);
-
-                    if (transferResult == LibUsb.SUCCESS && transferred.get(0) > 0) {
-                        byte[] payload = new byte[transferred.get(0)];
-                        inBuffer.get(payload);
-
-                        accumulator.write(payload);
-                        byte[] currentData = accumulator.toByteArray();
-
-                        int startIndex = indexOf(currentData, JPEG_START, 0);
-
-                        if (startIndex != -1) {
-                            int endIndex = indexOf(currentData, JPEG_END, startIndex + 3);
-
-                            if (endIndex != -1) {
-                                int frameLength = (endIndex + 2) - startIndex;
-                                byte[] fullFrame = new byte[frameLength];
-                                System.arraycopy(currentData, startIndex, fullFrame, 0, frameLength);
-
-                                if (queue.remainingCapacity() == 0) {
-                                    queue.poll();
-                                }
-
-                                queue.put(fullFrame);
-
-                                accumulator.reset();
-                                int remainingLength = currentData.length - (endIndex + 2);
-                                if (remainingLength > 0) {
-                                    accumulator.write(currentData, endIndex + 2, remainingLength);
-                                }
-                            }
-                        }
-
-                        if (accumulator.size() > 5000000) {
-                            System.err.println("Corrupted USB stream. Clearing buffer...");
-                            accumulator.reset();
-                        }
-
-                    } else if (transferResult != LibUsb.ERROR_TIMEOUT) {
-                        System.err.println("Critical error in USB read: " + LibUsb.errorName(transferResult));
+            try {
+                handle = findAndOpenDevice(context, VENDOR_ID);
+                if (handle == null) {
+                    System.out.println("Waiting for DxO ONE camera...");
+                    System.out.println("-> Make sure the cable is connected AND the lens cover is OPEN.\n");
+                    try {
+                        Thread.sleep(2000);
+                        continue;
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().isInterrupted();
                         break;
                     }
+                }
 
-                } catch (java.io.IOException e) {
-                    System.err.println("Error processing bytes in memory: " + e.getMessage());
-                    accumulator.reset();
+                // Claim exclusive control of the device interfaces
+                try {
+                    setupDeviceInterfaces(handle);
+                    startLiveViewMode(handle);
+                } catch (RuntimeException e) {
+                    System.err.println("Camera detected, but connection was rejected: " + e.getMessage());
+                    System.out.println("-> Firmware disconnects USB if the cover is closed. Please open it.\n");
+
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    continue;
+                }
+                System.out.println("Camera initialized. Starting frame capture...");
+
+                // 16KB or 32KB transfers to avoid saturating the bus with tiny requests
+                ByteBuffer inBuffer = BufferUtils.allocateByteBuffer(32768);
+                IntBuffer transferred = BufferUtils.allocateIntBuffer();
+
+                java.io.ByteArrayOutputStream accumulator = new java.io.ByteArrayOutputStream();
+
+                while (!Thread.currentThread().isInterrupted()) {
+                    try {
+                        inBuffer.clear();
+
+                        int transferResult = LibUsb.bulkTransfer(handle, ENDPOINT_IN, inBuffer, transferred, TIMEOUT_MS);
+
+                        if (transferResult == LibUsb.SUCCESS && transferred.get(0) > 0) {
+                            byte[] payload = new byte[transferred.get(0)];
+                            inBuffer.get(payload);
+
+                            accumulator.write(payload);
+                            byte[] currentData = accumulator.toByteArray();
+
+                            int startIndex = indexOf(currentData, JPEG_START, 0);
+
+                            if (startIndex != -1) {
+                                int endIndex = indexOf(currentData, JPEG_END, startIndex + 3);
+
+                                if (endIndex != -1) {
+                                    int frameLength = (endIndex + 2) - startIndex;
+                                    byte[] fullFrame = new byte[frameLength];
+                                    System.arraycopy(currentData, startIndex, fullFrame, 0, frameLength);
+
+                                    if (queue.remainingCapacity() == 0) {
+                                        queue.poll();
+                                    }
+
+                                    queue.put(fullFrame);
+
+                                    accumulator.reset();
+                                    int remainingLength = currentData.length - (endIndex + 2);
+                                    if (remainingLength > 0) {
+                                        accumulator.write(currentData, endIndex + 2, remainingLength);
+                                    }
+                                }
+                            }
+                            if (accumulator.size() > 5000000) {
+                                System.err.println("Corrupted USB stream. Clearing buffer...");
+                                accumulator.reset();
+                            }
+
+                        } else if (transferResult != LibUsb.ERROR_TIMEOUT) {
+                            System.err.println("Critical error in USB read: " + LibUsb.errorName(transferResult));
+                            System.out.println("Connection lost. System will try to reconnect...\n");
+                            break;
+                        }
+
+                    } catch (java.io.IOException e) {
+                        System.err.println("Error processing bytes in memory: " + e.getMessage());
+                        accumulator.reset();
+                    }
+                }
+            } catch (InterruptedException e) {
+                System.out.println("Producer thread interrupted. Shutting down...");
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                System.err.println("Unexpected error: " + e.getMessage());
+            } finally {
+                if (handle != null) {
+                    LibUsb.releaseInterface(handle, 0);
+                    LibUsb.releaseInterface(handle, 1);
+                    LibUsb.close(handle);
+                }
+                LibUsb.exit(context);
+            }
+
+            if(!Thread.currentThread().isInterrupted()){
+                try{
+                    Thread.sleep(2000);
                 } catch (InterruptedException e) {
-                    System.out.println("Producer thread interrupted. Closing camera read...");
-                    Thread.currentThread().interrupt();
-                    break;
+                    Thread.currentThread().isInterrupted();
                 }
             }
-        } finally {
-            // Strict cleaning of unmanaged memory
-            if (handle != null) {
-                LibUsb.releaseInterface(handle, 0);
-                LibUsb.releaseInterface(handle, 1);
-                LibUsb.close(handle);
-            }
-            LibUsb.exit(context);
         }
     }
 
