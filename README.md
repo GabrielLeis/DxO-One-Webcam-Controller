@@ -22,6 +22,7 @@ To maintain strict determinism and avoid UI or network blocking, the application
 │  (USB Polling)      │ ───► │  (Frame Buffer)   │ ───► │  (TCP MJPEG Server)  │
 │  libusb / JNI       │      │  Drop-if-lagging  │      │  localhost:8080      │
 └─────────────────────┘      └───────────────────┘      └──────────────────────┘
+
 ```
 
 1. **Producer (USB Polling):** Interfaces with the C-native `libusb` library via JNI. Sends the proprietary handshake (`0xA3 0xBA...`), claims the USB interfaces, and continuously polls the `IN` endpoint (`0x82`). Scans incoming raw byte chunks for standard JPEG headers (`FF D8 FF`) and trailers (`FF D9`) using zero-copy `ByteBuffer` techniques to prevent memory leaks.
@@ -100,6 +101,15 @@ Starting USB-to-TCP bridge for DxO ONE...
 MJPEG server listening on http://localhost:8080/video
 Camera initialized. Starting frame capture...
 ```
+
+---
+
+## Executable Scripts
+
+If you want to excecute the server without typing anything on the terminal you can create an automation script for both Windows and MacOS.
+You must place this file inside the same folder where you downloaded the Fat JAR. Both of them (for Windows and MacOS) are in the **executable_scripts/** folder.
+
+For example, you can create a folder in the Desktop, name it 'DXO-Server'. Place the .jar file inside and place the script for your Operating System. Then just double click it and use it as normal.
 
 ---
 
