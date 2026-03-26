@@ -5,6 +5,7 @@ import org.usb4java.*;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ScheduledExecutorService;
 
 public class UsbFrameProducer implements Runnable {
     private final BlockingQueue<byte[]> queue;
@@ -42,6 +43,7 @@ public class UsbFrameProducer implements Runnable {
         this.queue = queue;
     }
 
+
     @Override
     public void run() {
 
@@ -54,6 +56,7 @@ public class UsbFrameProducer implements Runnable {
             }
 
             DeviceHandle handle = null;
+            ScheduledExecutorService heartbeatTimer = null;
 
             try {
                 handle = findAndOpenDevice(context, VENDOR_ID);
@@ -86,6 +89,17 @@ public class UsbFrameProducer implements Runnable {
                     continue;
                 }
                 System.out.println("Camera initialized. Starting frame capture...");
+
+                heartbeatTimer = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+                final DeviceHandle finalHandle = handle;
+
+                heartbeatTimer.scheduleAtFixedRate(() -> {
+                    try {
+                        sendKeepAlivePing(finalHandle); // Tu función para enviar el JSON
+                    } catch (Exception e) {
+                        System.err.println("Heartbeat error: " + e.getMessage());
+                    }
+                }, 60, 60, java.util.concurrent.TimeUnit.SECONDS);
 
                 // 16KB or 32KB transfers to avoid saturating the bus with tiny requests
                 ByteBuffer inBuffer = BufferUtils.allocateByteBuffer(32768);
@@ -152,9 +166,13 @@ public class UsbFrameProducer implements Runnable {
             } catch (Exception e) {
                 System.err.println("Unexpected error: " + e.getMessage());
             } finally {
+                if (heartbeatTimer != null && !heartbeatTimer.isShutdown()) {
+                    heartbeatTimer.shutdownNow();
+                }
                 if (handle != null) {
                     LibUsb.releaseInterface(handle, 0);
-                    LibUsb.releaseInterface(handle, 1);
+                    // Don't use this interface to optimize resources
+                    // LibUsb.releaseInterface(handle, 1);
                     LibUsb.close(handle);
                 }
                 LibUsb.exit(context);
@@ -181,6 +199,8 @@ public class UsbFrameProducer implements Runnable {
                 LibUsb.getDeviceDescriptor(device, descriptor);
 
                 if (descriptor.idVendor() == vendorId) {
+                    //DEBUGGING
+                    //rintUsbArchitecture(device);
                     DeviceHandle handle = new DeviceHandle();
                     result = LibUsb.open(device, handle);
                     if (result == LibUsb.SUCCESS) {
@@ -194,22 +214,23 @@ public class UsbFrameProducer implements Runnable {
         return null;
     }
 
+    // Don't use interface 1 to optimize resources
     private void setupDeviceInterfaces(DeviceHandle handle) {
         LibUsb.setConfiguration(handle, 1);
 
         if (LibUsb.kernelDriverActive(handle, 0) == 1) LibUsb.detachKernelDriver(handle, 0);
-        if (LibUsb.kernelDriverActive(handle, 1) == 1) LibUsb.detachKernelDriver(handle, 1);
+        //if (LibUsb.kernelDriverActive(handle, 1) == 1) LibUsb.detachKernelDriver(handle, 1);
 
         int res1 = LibUsb.claimInterface(handle, 0);
-        int res2 = LibUsb.claimInterface(handle, 1);
-        if (res1 != LibUsb.SUCCESS || res2 != LibUsb.SUCCESS) {
+        //int res2 = LibUsb.claimInterface(handle, 1);
+        if (res1 != LibUsb.SUCCESS /* || res2 != LibUsb.SUCCESS */ ) {
             throw new RuntimeException("Failed to claim the USB interfaces.");
         }
 
-        int altRes = LibUsb.setInterfaceAltSetting(handle, 1, 1);
-        if (altRes != LibUsb.SUCCESS) {
-            throw new RuntimeException("Failed to set the alternate interface.");
-        }
+      //int altRes = LibUsb.setInterfaceAltSetting(handle, 1, 1);
+      //if (altRes != LibUsb.SUCCESS) {
+      //    throw new RuntimeException("Failed to set the alternate interface.");
+      //}
     }
 
     private void startLiveViewMode(DeviceHandle handle) {
@@ -222,23 +243,7 @@ public class UsbFrameProducer implements Runnable {
            If Java does not send it, the camera's RTOS will continue reading garbage memory until it crashes.
         */
         String jsonCommand = "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"dxo_camera_mode_switch\",\"params\":{\"param\":\"view\"}}\0";
-        byte[] payloadBytes = jsonCommand.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-
-        int payloadLength = payloadBytes.length;
-        // Least significant byte
-        byte lengthLsb = (byte) (payloadLength & 0xFF);
-        // Most significant byte
-        byte lengthMsb = (byte) ((payloadLength >> 8) & 0xFF);
-
-        int totalSize = RPC_HEADER.length + 2 + RPC_HEADER_TRAILER.length + payloadBytes.length;
-        ByteBuffer directBuffer = BufferUtils.allocateByteBuffer(totalSize);
-
-        directBuffer.put(RPC_HEADER);
-        directBuffer.put(lengthLsb);
-        directBuffer.put(lengthMsb);
-        directBuffer.put(RPC_HEADER_TRAILER);
-        directBuffer.put(payloadBytes);
-
+        ByteBuffer directBuffer = allocatePayloadInsideBuffer(jsonCommand);
         sendBufferToUsb(handle, directBuffer);
     }
 
@@ -307,5 +312,35 @@ public class UsbFrameProducer implements Runnable {
         System.out.println("===================================\n");
 
         LibUsb.freeConfigDescriptor(descriptor);
+    }
+
+    private void sendKeepAlivePing(DeviceHandle handle) {
+        String jsonCommand = "{\"jsonrpc\":\"2.0\",\"id\":101,\"method\":\"dxo_camera_mode_switch\",\"params\":{\"param\":\"view\"}}\0";
+        ByteBuffer directBuffer = allocatePayloadInsideBuffer(jsonCommand);
+
+        String timestamp = java.time.LocalTime.now().toString();
+        System.out.println("[DEBUG " + timestamp + "] Sending Heartbeat (Live View Re-assertion)...");
+
+        sendBufferToUsb(handle, directBuffer);
+    }
+
+    private ByteBuffer allocatePayloadInsideBuffer(String jsonCommand) {
+
+        byte[] payloadBytes = jsonCommand.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+        int payloadLength = payloadBytes.length;
+        byte lengthLsb = (byte) (payloadLength & 0xFF);
+        byte lengthMsb = (byte) ((payloadLength >> 8) & 0xFF);
+
+        int totalSize = RPC_HEADER.length + 2 + RPC_HEADER_TRAILER.length + payloadBytes.length;
+        ByteBuffer directBuffer = BufferUtils.allocateByteBuffer(totalSize);
+
+        directBuffer.put(RPC_HEADER);
+        directBuffer.put(lengthLsb);
+        directBuffer.put(lengthMsb);
+        directBuffer.put(RPC_HEADER_TRAILER);
+        directBuffer.put(payloadBytes);
+
+        return  directBuffer;
     }
 }

@@ -81,8 +81,8 @@ This is done by overriding the Ambarella RTOS boot sequence using an internal sh
 
 **1. Clone the repository:**
 ```bash
-git clone https://github.com/GabrielLeis/DxO-One-Webcam-Controller.git
-cd DxO-One-Webcam-Controller
+git clone https://github.com/GabrielLeis/dxo-one-webcam-server.git
+cd dxo-one-webcam-server
 ```
 
 **2. Build with Maven:**
@@ -110,6 +110,70 @@ If you want to excecute the server without typing anything on the terminal you c
 You must place this file inside the same folder where you downloaded the Fat JAR. Both of them (for Windows and MacOS) are in the **executable_scripts/** folder.
 
 For example, you can create a folder in the Desktop, name it 'DXO-Server'. Place the .jar file inside and place the script for your Operating System. Then just double click it and use it as normal.
+
+---
+
+## Hardware & System Architecture
+
+Through kernel log extraction via the Ambarella Shell (`autoexec.ash`), the internal architecture was identified:
+* **Main SoC:** Ambarella (likely A9 family) running a dual-OS architecture (ThreadX/uItron RTOS + Linux subsystem).
+* **Image Sensor:** Sony IMX183 (1-inch, 20.1 Megapixel BSI CMOS). 
+* **Power Management:** The firmware actively manages thermal throttling and battery life through aggressive state machines, cutting power to the sensor when passive behavior is detected.
+
+## Dynamic USB Topology & Hardware States
+
+The camera's hardware architecture mutates dynamically based on the physical state of the lens cover, triggering **Dynamic Re-enumeration** at the OS level:
+
+**Interface 0 — Control & Video Stream:**
+* **Cover Closed (Low-Power State):** The processor cuts power to secondary chips (audio DAC/ADC, image sensor) to save battery. It exposes a minimal USB descriptor:
+  * **Interface 0 (Alt-Setting 0):** Active.
+    * `Endpoint 0x01 (OUT)`: Command injection.
+    * `Endpoint 0x82 (IN)`: Multiplexed response and video stream.
+
+    | Endpoint | Direction | Role |
+    |---|---|---|
+    | `0x01` | OUT | Sends binary-framed JSON-RPC commands from host to camera |
+    | `0x82` | IN | Multiplexed bulk pipe — streams MJPEG video frames **and** JSON text responses simultaneously |
+
+**Interface 1 — Isochronous / Audio** *(activated via Alt-Setting 1):*
+* **Cover Open (High-Performance State):** A hardware interrupt wakes the secondary systems. The camera re-enumerates and exposes an additional interface:
+  * **Interface 1 (Alt-Setting 1):** Active.
+    * `Endpoint 0x05 (OUT)` & `Endpoint 0x84 (IN)`: Isochronous pipes likely reserved for raw PCM audio or uncompressed video.
+
+    | Endpoint | Direction | Role |
+    |---|---|---|
+    | `0x05` | OUT | Exposed dynamically in high-performance mode |
+    | `0x84` | IN | Likely reserved for raw PCM audio or uncompressed H.264 streaming |
+
+> **Engineering Decision:** To optimize memory management, garbage collection in the JVM, and USB bus bandwidth, this Java implementation deliberately ignores Interface 1. The firmware's modular design permits full MJPEG video streaming using only Interface 0.
+
+## Communication Protocol: Binary-Framed JSON-RPC
+
+The camera does not accept plain-text JSON. It strictly requires a **C-style binary wrapper** to parse commands without overflowing its memory buffer.
+
+A valid command sent to `Endpoint 0x01` must follow this byte structure:
+```
+┌──────────────────────────────────────┬──────────────────┬────────────────────────────┬──────────────────────────────┐
+│  RPC Header (8 bytes)                │  Length (2 bytes)│  Padding (22 bytes)        │  JSON Payload (variable)     │
+│  A3 BA D1 10 17 08 00 0C             │  LSB + MSB       │  0x00 × 22                 │  {"jsonrpc":...}\0           │
+└──────────────────────────────────────┴──────────────────┴────────────────────────────┴──────────────────────────────┘
+```
+
+> The JSON payload **must** be null-terminated (`\0`).
+
+---
+
+## Auto Power Off — Heartbeat Pattern
+
+The DxO ONE firmware includes an aggressive `AutoPowerOff` state machine that cuts power to the IMX183 sensor after **5 minutes of inactivity**. Since the Java application reads the video stream passively, the camera assumes it has been abandoned.
+
+To bypass this, the software implements a concurrent **Keep-Alive Heartbeat**: every 60 seconds, a dedicated background thread sends the following payload to `Endpoint 0x01`:
+
+```json
+{"jsonrpc":"2.0","id":101,"method":"dxo_camera_mode_switch","params":{"param":"view"}}\0
+```
+
+This re-assertion of Live View mode tricks the internal RTOS into resetting its idle timeout, keeping the camera streaming indefinitely, you **must** watch out for the camera temperature, if you're using it for long periods. Consequences of this change have not been tested, later on a temperature security shutdown must be implemented.
 
 ---
 
